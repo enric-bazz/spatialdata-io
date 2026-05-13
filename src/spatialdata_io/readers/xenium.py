@@ -32,7 +32,8 @@ from spatialdata.models import (
     ShapesModel,
     TableModel,
 )
-from spatialdata.transformations.transformations import Affine, Identity, Scale
+from spatialdata.transformations.transformations import Affine, Identity, Scale, Sequence
+from spatialdata.transformations import get_transformation, set_transformation
 from xarray import DataArray, DataTree
 
 from spatialdata_io._constants._constants import XeniumKeys
@@ -277,6 +278,7 @@ def xenium(
     imread_kwargs: Mapping[str, Any] = MappingProxyType({}),
     image_models_kwargs: Mapping[str, Any] = MappingProxyType({}),
     labels_models_kwargs: Mapping[str, Any] = MappingProxyType({}),
+    add_microns_cs: bool = False,
 ) -> SpatialData:
     """Read a *10x Genomics Xenium* dataset into a SpatialData object.
 
@@ -337,6 +339,8 @@ def xenium(
         Keyword arguments to pass to the image models.
     labels_models_kwargs
         Keyword arguments to pass to the labels models.
+    add_microns_sc
+        Whether to add a coordinate system corresponding to Xenium native micrometers.
 
     Returns
     -------
@@ -465,6 +469,10 @@ def xenium(
         extra_images = _add_aligned_images(path, imread_kwargs, image_models_kwargs)
         for key, value in extra_images.items():
             sdata.images[key] = value
+
+    # Add 'microns' cs
+    if add_microns_cs:
+        sdata = _add_microns_coordinate_system(sdata=sdata, pixel_size=specs["pixel_size"])
 
     return _set_reader_metadata(sdata, "xenium")
 
@@ -1126,3 +1134,39 @@ def prefix_suffix_uint32_from_cell_id_str(
     cell_id_prefix = [int(x, 16) for x in cell_id_prefix_hex]
 
     return np.array(cell_id_prefix, dtype=np.uint32), np.array(dataset_suffix_int)
+
+
+def _add_microns_coordinate_system(
+    sdata,
+    pixel_size: float,
+):
+    """
+    Adds a physical coordinate system corresponding to Xenium native micrometers.
+    Using the Identity transformation for elements that lay natively in the micrometers coordinate systems would be
+    more elegant, but less coherent with the object graphs semantics.
+    """
+
+    pixel_to_microns = Scale(
+        [pixel_size, pixel_size],
+        axes=("x", "y"),
+    )
+
+    for _, _, elem in sdata.gen_elements():
+
+        # get existing transform
+        try:
+            global_t = get_transformation(elem, to_coordinate_system="global")
+        except Exception:
+            # fallback: if missing, skip
+            continue
+
+        # compose: global -> microns
+        microns_t = Sequence([pixel_to_microns, global_t])
+
+        set_transformation(
+            elem,
+            microns_t,
+            to_coordinate_system='microns',
+        )
+
+    return sdata
